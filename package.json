@@ -1,0 +1,10 @@
+{
+  "name": "dakos-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dakos API — Vercel Serverless + MongoDB",
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "mongodb": "^6.10.0"
+  }
+}
