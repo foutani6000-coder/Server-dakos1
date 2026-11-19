@@ -201,7 +201,7 @@ async function getSettings() {
 }
 const publicConfig = (s) => ({
   price: s.price, dailyGold: s.dailyGold, referralGold: s.referralGold, welcomeGold: s.welcomeGold,
-  adReward: s.adGold, adDailyLimit: s.adDailyLimit,
+  adGold: s.adGold, adReward: s.adGold, adDailyLimit: s.adDailyLimit, adCooldownSec: s.adCooldownSec,
   appLink: ENV.APP_LINK || '', adZone: ENV.AD_ZONE || '12109806',
 });
 
