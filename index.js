@@ -137,7 +137,7 @@ function getDb() {
     globalThis.__dakosMongo = (async () => {
       const uri = ENV.MONGODB_URI;
       if (!uri) throw fail(500, 'config', 'لم يُضبط MONGODB_URI (رابط قاعدة بيانات MongoDB)');
-      const client = new MongoClient(uri, { maxPoolSize: 5, serverSelectionTimeoutMS: 15000, connectTimeoutMS: 15000 });
+      const client = new MongoClient(uri, { maxPoolSize: 5, serverSelectionTimeoutMS: 8000, connectTimeoutMS: 8000 });
       await client.connect();
       return client.db(/mongodb(\+srv)?:\/\/[^/]+\/[^?]+/.test(uri) ? undefined : 'dakos');
     })().catch((e) => { globalThis.__dakosMongo = null; throw e; });
@@ -237,7 +237,7 @@ async function sendMail(to, code) {
   const html = `<div dir="rtl" style="font-family:Arial,sans-serif;font-size:16px"><p>رمز التحقق الخاص بك:</p><p style="font-size:30px;font-weight:bold;letter-spacing:8px">${code}</p><p>صالح لمدة 10 دقائق. إن لم تطلب هذا الرمز فتجاهل الرسالة.</p></div>`;
   const from = ENV.MAIL_FROM || '';
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 9000);
+  const timer = setTimeout(() => ctl.abort(), 5000); // أقل من حد Vercel (10ث) ليصل رد واضح بدل انقطاع الاتصال
   try {
     let res;
     if (ENV.RESEND_API_KEY && from) {
@@ -260,7 +260,7 @@ async function sendMail(to, code) {
     } else {
       throw new Error('mail provider not configured');
     }
-    if (!res.ok) throw new Error(`mail provider ${res.status}`);
+    if (!res.ok) { const detail = await res.text().catch(() => ''); throw new Error(`mail provider ${res.status} ${detail.slice(0, 300)}`); }
   } catch (e) {
     console.error('mail_failed:', e && e.message);
     throw fail(502, 'mail_failed', 'تعذّر إرسال رمز التحقق إلى البريد، حاول لاحقًا');
