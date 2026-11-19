@@ -209,6 +209,8 @@ const publicConfig = (s) => ({
 /* ════════════════════════════ تحديد المعدل (في القاعدة) ════════════════════════════ */
 
 async function hit(key, limit, windowMs) {
+  // وضع الاختبار المؤقت (SKIP_MAIL_CODE=1): لا حدّ لمحاولات إنشاء الحساب والتحقق والدخول. حدود دخول المشرف تبقى كما هي.
+  if (ENV.SKIP_MAIL_CODE === '1' && /^(reg|ver|rs|lg):/.test(key)) return;
   const now = Date.now();
   const col = await C('rate_limits');
   let cnt = 1;
