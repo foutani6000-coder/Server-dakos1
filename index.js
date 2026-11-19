@@ -232,6 +232,7 @@ async function hit(key, limit, windowMs) {
 /* ════════════════════════════ البريد ════════════════════════════ */
 
 async function sendMail(to, code) {
+  if (ENV.SKIP_MAIL_CODE === '1') return; // وضع مؤقت: لا إرسال بريد (الرمز ثابت 000000)
   const subject = 'رمز التحقق من Dakos';
   const text = `رمز التحقق الخاص بك: ${code} (صالح 10 دقائق)`;
   const html = `<div dir="rtl" style="font-family:Arial,sans-serif;font-size:16px"><p>رمز التحقق الخاص بك:</p><p style="font-size:30px;font-weight:bold;letter-spacing:8px">${code}</p><p>صالح لمدة 10 دقائق. إن لم تطلب هذا الرمز فتجاهل الرسالة.</p></div>`;
@@ -263,12 +264,14 @@ async function sendMail(to, code) {
     if (!res.ok) { const detail = await res.text().catch(() => ''); throw new Error(`mail provider ${res.status} ${detail.slice(0, 300)}`); }
   } catch (e) {
     console.error('mail_failed:', e && e.message);
-    throw fail(502, 'mail_failed', 'تعذّر إرسال رمز التحقق إلى البريد، حاول لاحقًا');
+    // مؤقتًا للتشخيص: نُظهر رقم الحالة ورسالة المزوّد (بدون أي مفاتيح) بكود مختلف كي تعرضه الواجهة كما هو.
+    // لإرجاع الرسالة العامة: استبدل السطر التالي بـ throw fail(502, 'mail_failed', 'تعذّر إرسال رمز التحقق إلى البريد، حاول لاحقًا');
+    throw fail(502, 'mail_error', `تعذّر إرسال البريد: ${String((e && e.message) || 'unknown').slice(0, 220)}`);
   } finally { clearTimeout(timer); }
 }
 
 function issueCode() {
-  const code = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
+  const code = ENV.SKIP_MAIL_CODE === '1' ? '000000' : String(crypto.randomInt(0, 1000000)).padStart(6, '0');
   const salt = crypto.randomBytes(16).toString('hex');
   return { code, salt, hash: sha(`${salt}:${code}`), expires: Date.now() + CODE_TTL };
 }
