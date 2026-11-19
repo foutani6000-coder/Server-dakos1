@@ -24,6 +24,7 @@ const CODE_TTL = 10 * 60 * 1000;
 const USER_TOKEN_TTL = 30 * 24 * 3600;
 const ADMIN_TOKEN_TTL = 12 * 3600;
 const PAGE_SIZE = 20;
+const SERIES_IMG_MAX_BYTES = 300 * 1024;
 
 // الإعدادات الافتراضية للذهب والإعلانات: [القيمة، الحد الأدنى، الحد الأقصى]
 const SETTING_DEFS = {
@@ -376,7 +377,7 @@ add('GET', '/health', null, async () => {
 add('GET', '/catalog', null, async (ctx) => {
   const [seriesC, episodesC, ratingsC, storiesC] = await Promise.all([C('series'), C('episodes'), C('ratings'), C('stories')]);
   const [seriesRows, epRows, voteRows, storyRows, settings] = await Promise.all([
-    seriesC.find({}).sort({ created_at: -1, _id: 1 }).toArray(),
+    seriesC.find({}, { projection: { image_data: 0 } }).sort({ created_at: -1, _id: 1 }).toArray(),
     episodesC.find({}, { projection: { series_id: 1, episode: 1 } }).sort({ series_id: 1, episode: 1 }).toArray(),
     ratingsC.aggregate([{ $group: { _id: { s: '$series_id', st: '$stars' }, c: { $sum: 1 } } }]).toArray(),
     storiesC.find({ $or: [{ expires_at: 0 }, { expires_at: { $gt: ctx.now } }] }).sort({ created_at: -1 }).toArray(),
@@ -406,6 +407,17 @@ add('GET', '/user/photo', null, async (ctx) => {
   const id = toInt(ctx.query.id, 1, Number.MAX_SAFE_INTEGER, 'المعرّف');
   const u = await (await C('users')).findOne({ _id: id, verified: true, banned: false }, { projection: { photo: 1 } });
   const m = u && /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(u.photo || '');
+  if (!m) throw fail(404, 'not_found', 'لا توجد صورة');
+  ctx.raw(200, {
+    'Content-Type': m[1], 'Cache-Control': 'public, max-age=31536000, immutable',
+    'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'",
+  }, Buffer.from(m[2], 'base64'));
+});
+
+add('GET', '/series/image', null, async (ctx) => {
+  const id = cleanId(ctx.query.id);
+  const r = await (await C('series')).findOne({ _id: id }, { projection: { image_data: 1 } });
+  const m = r && /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/.exec(r.image_data || '');
   if (!m) throw fail(404, 'not_found', 'لا توجد صورة');
   ctx.raw(200, {
     'Content-Type': m[1], 'Cache-Control': 'public, max-age=31536000, immutable',
@@ -917,7 +929,7 @@ function cleanI18n(v) {
 add('GET', '/admin/series', 'admin', async () => {
   const [seriesC, episodesC, unlocksC] = await Promise.all([C('series'), C('episodes'), C('unlocks')]);
   const [rows, eps, views] = await Promise.all([
-    seriesC.find({}).sort({ created_at: -1, _id: 1 }).toArray(),
+    seriesC.find({}, { projection: { image_data: 0 } }).sort({ created_at: -1, _id: 1 }).toArray(),
     episodesC.find({}, { projection: { series_id: 1, episode: 1 } }).sort({ series_id: 1, episode: 1 }).toArray(),
     unlocksC.aggregate([{ $group: { _id: '$series_id', v: { $sum: '$views' } } }]).toArray(),
   ]);
@@ -935,7 +947,7 @@ add('POST', '/admin/series', 'admin', async (ctx) => {
     title,
     category: cleanStr(b.category || 'drama', 30).toLowerCase() || 'drama',
     yr: cleanStr(b.year, 10), rating: cleanStr(b.rating, 10),
-    image: cleanUrl(b.image), tag: cleanStr(b.tag, 40),
+    tag: cleanStr(b.tag, 40),
     description: cleanStr(b.description, 2000, true),
     episodes: toInt(b.episodes, 1, 5000, 'عدد الحلقات'),
     i18n: cleanI18n(b.i18n),
@@ -944,14 +956,40 @@ add('POST', '/admin/series', 'admin', async (ctx) => {
   let id = b.id ? cleanId(b.id) : '';
   const exists = id ? !!(await seriesC.findOne({ _id: id }, { projection: { _id: 1 } })) : false;
   if (!id) id = rid('s');
+
+  // صورة الغلاف: إمّا رفع من الهاتف (data:image) فتُخزَّن في القاعدة وتُخدَم من /api/series/image، أو رابط http(s)
+  const imgIn = typeof b.image === 'string' ? b.image.trim() : '';
+  let imageData = null;
+  if (/^data:/i.test(imgIn)) {
+    const m = /^data:image\/(jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(imgIn);
+    if (!m) throw bad('صيغة الصورة غير مدعومة');
+    const buf = Buffer.from(m[2], 'base64');
+    if (buf.length > SERIES_IMG_MAX_BYTES) throw bad('حجم الصورة كبير (الحد 300KB)');
+    const magicOk = (m[1] === 'jpeg' && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff)
+      || (m[1] === 'png' && buf.slice(0, 4).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47])))
+      || (m[1] === 'webp' && buf.slice(0, 4).toString() === 'RIFF' && buf.slice(8, 12).toString() === 'WEBP');
+    if (!magicOk) throw bad('ملف الصورة غير صالح');
+    imageData = imgIn;
+    f.image = `${ctx.base}/api/series/image?id=${id}&v=${ctx.now}`;
+  } else if (imgIn && imgIn.includes(`/api/series/image?id=${id}`)) {
+    f.image = null; // الصورة المرفوعة نفسها دون تغيير
+  } else {
+    f.image = cleanUrl(imgIn);
+  }
+  if (!exists && !f.image) throw bad('صورة الغلاف مطلوبة');
+  const unsetImg = {};
+  if (imageData) f.image_data = imageData;
+  else if (f.image) unsetImg.image_data = ''; // تحوّل إلى رابط خارجي: نحذف الصورة المخزّنة
+  if (f.image === null) delete f.image;
+
   if (exists) {
-    await seriesC.updateOne({ _id: id }, { $set: f });
+    await seriesC.updateOne({ _id: id }, { $set: f, ...(Object.keys(unsetImg).length ? { $unset: unsetImg } : {}) });
     await (await C('episodes')).deleteMany({ series_id: id, episode: { $gt: f.episodes } });
   } else {
     await seriesC.insertOne({ _id: id, ...f, created_at: ctx.now });
-    if (b.notify !== false) await addNotification('series', id, title, f.image, 0, 1);
+    if (b.notify !== false) await addNotification('series', id, title, f.image || '', 0, 1);
   }
-  return { success: true, series: { id, title: f.title, category: f.category, year: f.yr, rating: f.rating, image: f.image, tag: f.tag, description: f.description, episodes: f.episodes, i18n: parseJson(f.i18n, {}) } };
+  return { success: true, series: { id, title: f.title, category: f.category, year: f.yr, rating: f.rating, image: f.image || '', tag: f.tag, description: f.description, episodes: f.episodes, i18n: parseJson(f.i18n, {}) } };
 });
 
 add('DELETE', '/admin/series', 'admin', async (ctx) => {
