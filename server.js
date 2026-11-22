@@ -441,18 +441,54 @@ function badgeKey(v) {
   return 'none';
 }
 const userById = (id) => db.users.find((u) => u.id === id);
+
+// ───────── التوثيق: أزرق (بطلب بعد الشروط) · أصفر (100 ساعة مشاهدة تلقائياً) · بنفسجي (فريق Sedhok فقط) ─────────
+const YELLOW_WATCH_SECS = 100 * 3600;
+const VERIFY_MIN_WATCH_SECS = 3600;   // ساعة مشاهدة على الأقل لطلب الأزرق
+const VERIFY_MIN_ACCOUNT_DAYS = 7;
+function watchSecsOf(u) {
+  if (u.watch_secs === undefined) {
+    let n = 0; const lib = db.libraries && db.libraries[u.id];
+    if (lib) for (const v of Object.values(lib.reading_seconds || {})) n += toInt(v, 0);
+    u.watch_secs = n;
+  }
+  return u.watch_secs;
+}
+/** العلامة الفعلية: البنفسجي يمنحه الأدمن فقط ويتقدّم، ثم الأصفر تلقائياً عند 100 ساعة، ثم المخزَّنة */
+function effBadge(u) {
+  const b = (u && u.badge) || 'none';
+  if (b === 'purple') return 'purple';
+  if (u && watchSecsOf(u) >= YELLOW_WATCH_SECS) return 'yellow';
+  return b;
+}
+/** شروط الأزرق (نفس شروط التطبيق). أول 7 = الصورة والمعلومات الشخصية */
+function verifyChecks(u) {
+  const e = u.extras || {}; const has = (v) => str(v).length > 0;
+  const days = u.created_at ? Math.floor((now() - u.created_at) / 86400000) : 9999;
+  return [
+    { key: 'avatar', label: 'صورة بروفايل شخصية', ok: has(u.avatar_url) },
+    { key: 'name', label: 'اسم حقيقي (3 أحرف فأكثر)', ok: str(u.name).length >= 3 && u.name !== 'مشاهد Sedhok' },
+    { key: 'bio', label: 'نبذة تعريفية (15 حرفاً فأكثر)', ok: str(u.bio).length >= 15 },
+    { key: 'country', label: 'الدولة', ok: has(e.country) },
+    { key: 'city', label: 'المدينة', ok: has(e.city) },
+    { key: 'birthday', label: 'تاريخ الميلاد', ok: has(e.birthday) },
+    { key: 'gender', label: 'الجنس', ok: has(e.gender) },
+    { key: 'age', label: 'مضى على حسابك ' + VERIFY_MIN_ACCOUNT_DAYS + ' أيام', ok: days >= VERIFY_MIN_ACCOUNT_DAYS },
+    { key: 'watch', label: 'شاهدت ساعة واحدة على الأقل', ok: watchSecsOf(u) >= VERIFY_MIN_WATCH_SECS },
+  ];
+}
 const seriesById = (id) => db.series.find((s) => s.id === id);
 const isHidden = (id) => db.settings.hidden.includes(id);
 const visibleSeries = () => db.series.filter((s) => !isHidden(s.id));
 
 function userPublic(u, withEmail) {
-  const o = { id: u.id, name: u.name, avatar_url: absUrl(u.avatar_url || ''), bio: u.bio || '', badge: u.badge || 'none', joined: u.joined || '' };
+  const o = { id: u.id, name: u.name, avatar_url: absUrl(u.avatar_url || ''), bio: u.bio || '', badge: effBadge(u), joined: u.joined || '' };
   if (withEmail) { o.email = u.email || ''; o.is_admin = false; }
   return o;
 }
 function authorInfo(userId, fallbackName) {
   const u = userById(userId);
-  return { author: u ? u.name : (fallbackName || 'مشاهد'), author_id: userId || '', badge: u ? (u.badge || 'none') : 'none' };
+  return { author: u ? u.name : (fallbackName || 'مشاهد'), author_id: userId || '', badge: u ? effBadge(u) : 'none' };
 }
 
 /** تقييم العمل: متوسط تقييمات المستخدمين مع احتساب تقييم الأدمن كأنه 10 أصوات */
@@ -953,6 +989,23 @@ POST('/users/me', 'user', ({ user, body }) => {
 });
 PUT('/users/me', 'user', (c) => routes.find((r) => r.method === 'POST' && r.pattern === '/users/me').handler(c));
 
+/** GET /users/me/verification → {badge, verified, checks:[{key,label,ok}], profile_complete, can_verify} */
+GET('/users/me/verification', 'user', ({ user }) => {
+  const checks = verifyChecks(user);
+  return { badge: effBadge(user), verified: (user.badge || 'none') !== 'none', checks, profile_complete: checks.slice(0, 7).every((c) => c.ok), can_verify: checks.every((c) => c.ok) };
+});
+/** POST /users/me/verify: يمنح الأزرق إن تحققت كل الشروط (السيرفر هو الحكم). البنفسجي لا يُطلب أبداً. */
+POST('/users/me/verify', 'user', ({ user }) => {
+  needActive({ user });
+  const checks = verifyChecks(user);
+  if ((user.badge || 'none') === 'none') {
+    const bad_ = checks.filter((c) => !c.ok);
+    if (bad_.length) { const e = bad('لم تكتمل شروط التوثيق: ' + bad_.map((c) => c.label).join('، ')); e.checks = checks; throw e; }
+    user.badge = 'blue'; save();
+  }
+  return { ok: true, badge: effBadge(user), checks };
+});
+
 GET('/users/:id', 'optional', ({ params, user }) => {
   const u = userById(params.id);
   if (!u || u.deleted) throw notFound('المستخدم غير موجود');
@@ -1241,8 +1294,20 @@ GET('/notifications', 'optional', ({ q, user }) => {
       });
     }
   }
-  for (const b of db.broadcasts) out.push({ id: 'bc_' + b.id, title: b.title, body: b.body, created_at: rel(b.at), series_id: b.series_id || null, chapter: null, read: false, _at: b.at });
+  for (const b of db.broadcasts) out.push({ id: 'bc_' + b.id, title: b.title, body: b.body, image: b.image ? absUrl(b.image) : null, created_at: rel(b.at), series_id: b.series_id || null, chapter: null, read: false, _at: b.at });
   return out.sort((a, b) => b._at - a._at).slice(0, 60).map(({ _at, ...r }) => r);
+});
+
+/** إشعارات الأدمن لشريط إشعارات الهاتف. يفحصها التطبيق دورياً (WorkManager) حتى وهو مغلق.
+ *  بلا since (أول تشغيل): لا إشعارات، فقط «now» حتى لا يرى المستخدم الجديد إشعارات قديمة.
+ *  مع since: الأحدث من since (الأقدم أولاً، حتى 5). now = ساعة السيرفر بالميلي ثانية. */
+GET('/broadcasts', 'none', ({ q }) => {
+  const t = now();
+  const since = parseInt(q.since, 10) || 0;
+  if (!since) return { now: t, broadcasts: [] };
+  const list = db.broadcasts.filter((b) => b.at > since).sort((a, b) => a.at - b.at).slice(0, 5)
+    .map((b) => ({ id: String(b.id), title: b.title, body: b.body, image: b.image ? absUrl(b.image) : '', series_id: b.series_id || '', created_at_ms: b.at }));
+  return { now: t, broadcasts: list };
 });
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1275,6 +1340,7 @@ POST('/library/sync', 'user', ({ user, body }) => {
   if (isObj(body.reading_seconds)) {
     lib.reading_seconds = {};
     for (const [k, v] of Object.entries(body.reading_seconds).slice(0, 2000)) lib.reading_seconds[str(k, 60)] = Math.max(0, toInt(v));
+    user.watch_secs = Object.values(lib.reading_seconds).reduce((a, v) => a + toInt(v, 0), 0); // يغذّي الأصفر (100 ساعة)
   }
   if (Array.isArray(body.recommended)) lib.recommended = uniq(body.recommended.map((x) => str(x, 60)).filter(Boolean)).slice(0, 200);
   save();
@@ -1435,7 +1501,7 @@ function chatPublic(c, me) {
   const otherId = c.members.find((m) => m !== me) || me;
   const o = userById(otherId); const last = c.messages[c.messages.length - 1];
   return {
-    id: c.id, user_id: otherId, name: o ? o.name : 'مشاهد', badge: o ? o.badge || 'none' : 'none',
+    id: c.id, user_id: otherId, name: o ? o.name : 'مشاهد', badge: o ? effBadge(o) : 'none',
     last_message: last ? last.text : '', time: last ? rel(last.at) : '', updated_at: last ? last.at : c.at,
     unread: c.messages.filter((m) => m.from !== me && !(m.read || []).includes(me)).length,
   };
@@ -1594,7 +1660,7 @@ GET('/groups/:id/members', 'user', ({ user, params }) => {
   const g = findGroup(params.id, user.id, true);
   if (gRole(g, user.id) === 'none') throw forbidden('للأعضاء فقط');
   gTouch(g);
-  return g.members.map((m) => ({ id: m.id, name: gName(m.id), role: gRole(g, m.id), joined_at: m.at, badge: (userById(m.id) || {}).badge || 'none' }));
+  return g.members.map((m) => ({ id: m.id, name: gName(m.id), role: gRole(g, m.id), joined_at: m.at, badge: effBadge(userById(m.id) || {}) }));
 });
 GET('/groups/:id/requests', 'user', ({ user, params }) => {
   const g = findGroup(params.id, user.id, true);
@@ -1727,7 +1793,7 @@ function relationOf(viewerId, targetId) {
 }
 function personPublic(u, viewerId) {
   return {
-    id: u.id, name: u.name, badge: u.badge || 'none', avatar_url: absUrl(u.avatar_url || ''), bio: u.bio || '',
+    id: u.id, name: u.name, badge: effBadge(u), avatar_url: absUrl(u.avatar_url || ''), bio: u.bio || '',
     mutual: viewerId && viewerId !== u.id ? mutualCount(viewerId, u.id) : 0,
   };
 }
@@ -2309,21 +2375,33 @@ POST('/admin/users/:id/reset-token', 'admin', ({ params }) => {
 });
 
 // ───────── الإشعارات العامة ─────────
-GET('/admin/notifications', 'admin', () => db.broadcasts.slice().reverse().map((b) => ({ id: b.id, title: b.title, body: b.body, series_id: b.series_id || '', created_at: rel(b.at), created_ts: b.at })));
-POST('/admin/notifications', 'admin', ({ body }) => {
+const broadcastAdmin = (b) => ({ id: b.id, title: b.title, body: b.body, image: b.image ? absUrl(b.image) : '', series_id: b.series_id || '', created_at: rel(b.at), created_ts: b.at });
+GET('/admin/notifications', 'admin', () => db.broadcasts.slice().reverse().map(broadcastAdmin));
+GET('/admin/broadcasts', 'admin', () => db.broadcasts.slice().reverse().map(broadcastAdmin));
+/** ينشر إشعاراً لكل المستخدمين (JSON أو multipart). الصورة اختيارية: ملف image/file أو رابط image. النص اختياري إن وُجد عنوان. */
+function createBroadcast({ body, files }) {
   const title = str(body.title, 120); const text = str(body.body, 500);
-  if (!title || !text) throw bad('أدخل عنوان الإشعار ونصه');
+  if (!title) throw bad('أدخل عنوان الإشعار');
   const sid = str(body.series_id, 60);
   if (sid && !seriesById(sid)) throw bad('العمل المرتبط غير موجود');
-  const b = { id: uid('b'), title, body: text, series_id: sid, at: now() };
+  const f = ((files && (files.image || files.file || files.images)) || [])[0];
+  const image = f ? saveImage(f) : safeUrl(body.image);
+  const b = { id: uid('b'), title, body: text, image, series_id: sid, at: now() };
   db.broadcasts.push(b); save();
-  return { id: b.id, title, body: text, series_id: sid, created_at: rel(b.at) };
-});
-DEL('/admin/notifications/:id', 'admin', ({ params }) => {
-  if (!db.broadcasts.some((b) => b.id === params.id)) throw notFound('الإشعار غير موجود');
-  db.broadcasts = db.broadcasts.filter((b) => b.id !== params.id); save();
+  return { id: b.id, title, body: text, image: image ? absUrl(image) : '', series_id: sid, created_at: rel(b.at) };
+}
+function deleteBroadcast({ params }) {
+  const b = db.broadcasts.find((x) => x.id === params.id);
+  if (!b) throw notFound('الإشعار غير موجود');
+  if (b.image) removeUpload(b.image);
+  db.broadcasts = db.broadcasts.filter((x) => x.id !== params.id); save();
   return { ok: true };
-});
+}
+POST('/admin/notifications', 'admin', createBroadcast);
+POST('/admin/broadcasts', 'admin', createBroadcast);
+DEL('/admin/notifications/:id', 'admin', deleteBroadcast);
+DEL('/admin/broadcasts/:id', 'admin', deleteBroadcast);
+POST('/admin/broadcasts/:id/delete', 'admin', deleteBroadcast);
 
 // ───────── المجموعات (إشراف) ─────────
 GET('/admin/groups', 'admin', () => db.groups.map((g) => ({ id: g.id, code: g.code, name: g.name, owner: g.owner, owner_name: gName(g.owner), public: g.public, frozen: !!g.frozen, mode: g.mode, members: g.members.length, requests: g.requests.length, messages: g.messages.length, created_at: g.at })));
@@ -2977,7 +3055,7 @@ async function handle(req, res) {
 
   const { r, m } = match;
   // مفتاح التطبيق (اختياري): يلزم توكن مستخدم/أدمن أو API_KEY لكل مسارات التطبيق
-  if (API_KEY && r.auth !== 'admin' && p !== '/admin/login' && !ident.user && !ident.admin && !ident.apiKey && !['/', '/health'].includes(p)) {
+  if (API_KEY && r.auth !== 'admin' && p !== '/admin/login' && p !== '/broadcasts' && !ident.user && !ident.admin && !ident.apiKey && !['/', '/health'].includes(p)) {
     return send(res, 401, { message: 'مفتاح التطبيق مطلوب', error: 'api_key_required' });
   }
   if (r.auth === 'admin' && !ident.admin) return send(res, 401, { message: 'يلزم تسجيل دخول الأدمن', error: 'admin_required' });
