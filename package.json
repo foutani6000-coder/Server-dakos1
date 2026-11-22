@@ -1,10 +1,9 @@
 {
-  "name": "dakos-server",
+  "name": "sedhok-server",
   "version": "1.0.0",
   "private": true,
-  "description": "Dakos API — Vercel Serverless + MongoDB",
-  "engines": { "node": ">=18" },
-  "dependencies": {
-    "mongodb": "^6.10.0"
-  }
+  "description": "Sedhok API server (single file, zero dependencies)",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
 }
