@@ -1879,6 +1879,15 @@ POST('/users/me/privacy', 'user', ({ user, body }) => {
   user.privacy = cur; save();
   return { ok: true, privacy: cur };
 });
+/** POST /uploads (مستخدم مسجّل): multipart بحقل file → {path, url}. للصورة الشخصية والغلاف وصورة القصة. */
+POST('/uploads', 'user', ({ user, files }) => {
+  needActive({ user });
+  throttle(user.id + ':up', 20, 60000);
+  const f = (files.file || files.image || files.images || [])[0];
+  if (!f) throw bad('أرفق صورة في الحقل file');
+  const path_ = saveImage(f);
+  return { path: path_, url: absUrl(path_) };
+});
 /** POST /users/me/about: country, city, hometown, work, education, relationship, partner, birthday, gender, website, interests, cover_url, story_text, story_image, story_at */
 POST('/users/me/about', 'user', ({ user, body }) => {
   const e = user.extras = isObj(user.extras) ? user.extras : {};
@@ -2576,6 +2585,7 @@ POST('/admin/cleanup-uploads', 'admin', async () => {
   const used = new Set();
   const add = (u) => { const m = /^\/uploads\/([\w.\-]+)$/.exec(u || ''); if (m) used.add(m[1]); };
   db.series.forEach((s) => add(s.cover)); db.news.forEach((n) => add(n.image)); db.users.forEach((u) => add(u.avatar_url));
+  db.users.forEach((u) => { const e = u.extras || {}; add(e.cover_url); add(e.story_image); });
   db.posts.forEach((p) => (p.images || []).forEach(add)); db.groups.forEach((g) => add(g.photo));
   Object.values(db.episodes).flat().forEach((e) => add(e.thumb));
   let n = 0;
