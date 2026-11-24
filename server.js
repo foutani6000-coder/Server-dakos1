@@ -488,7 +488,7 @@ function userPublic(u, withEmail) {
 }
 function authorInfo(userId, fallbackName) {
   const u = userById(userId);
-  return { author: u ? u.name : (fallbackName || 'مشاهد'), author_id: userId || '', badge: u ? effBadge(u) : 'none' };
+  return { author: u ? u.name : (fallbackName || 'مشاهد'), author_id: userId || '', badge: u ? effBadge(u) : 'none', author_avatar: u ? absUrl(u.avatar_url || '') : '' };
 }
 
 /** تقييم العمل: متوسط تقييمات المستخدمين مع احتساب تقييم الأدمن كأنه 10 أصوات */
@@ -505,7 +505,8 @@ function seriesPublic(s) {
   const eps = db.episodes[s.id];
   return {
     id: s.id, title: s.title, cover: absUrl(s.cover) || null, type: s.type, status: s.status,
-    episodes: eps && eps.length ? eps.length : s.episodes || 0, rating: effectiveRating(s), views: s.views || 0,
+    episodes: eps && eps.length ? eps.length : s.episodes || 0, rating: effectiveRating(s),
+    rating_count: db.ratings[s.id] ? Object.keys(db.ratings[s.id]).length : 0, views: s.views || 0,
     genres: s.genres || [], synopsis: s.synopsis || '', is_new: !!s.is_new, year: s.year, seasons: s.seasons || 1,
     country: s.country || '', qualities: s.qualities || [], cast: s.cast || [],
   };
@@ -1179,9 +1180,10 @@ function commentPublic(c, viewer) {
   for (const r of Object.values(rm)) counts[r] = (counts[r] || 0) + 1;
   const mine = viewer ? rm[viewer.id] || null : null;
   return {
-    id: c.id, series_id: c.ref, episode: c.ep, author: a.author, author_id: a.author_id, badge: a.badge, text: c.text,
+    id: c.id, series_id: c.ref, episode: c.ep, author: a.author, author_id: a.author_id, author_avatar: a.author_avatar, badge: a.badge, text: c.text,
     created_at: rel(c.at), created_ts: c.at, likes: Object.keys(rm).length, liked: !!mine, reactions: counts, my_reaction: mine,
     edited: !!c.edited, parent_id: c.parent_id || null,
+    mine: !!(viewer && c.user_id === viewer.id),
   };
 }
 const commentsOf = (scope, ref, ep) => db.comments.filter((c) => c.scope === scope && c.ref === ref && (c.ep || null) === (ep || null));
@@ -1395,10 +1397,11 @@ function postPublic(p, viewer) {
     };
   }
   return {
-    id: p.id, author: a.author, author_id: a.author_id, badge: a.badge, body: p.body, tag: p.tag || '',
+    id: p.id, author: a.author, author_id: a.author_id, author_avatar: a.author_avatar, badge: a.badge, body: p.body, tag: p.tag || '',
     created_at: rel(p.at), created_ts: p.at, comments: db.comments.filter((c) => c.scope === 'post' && c.ref === p.id).length,
     images: (p.images || []).map(absUrl), poll, reactions: rx, my_reaction: viewer ? (p.reactions || {})[viewer.id] || null : null,
     privacy: postPriv(p), edited: !!p.edited,
+    mine: !!(viewer && p.author_id === viewer.id),
   };
 }
 const postVisible = (p) => { const u = userById(p.author_id); return !(u && u.banned); };
