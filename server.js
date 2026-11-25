@@ -1280,23 +1280,56 @@ GET('/news/:id', 'none', ({ params }) => {
   return newsPublic(n);
 });
 GET('/notifications', 'optional', ({ q, user }) => {
+  // الإشعارات تشمل كل ما يُنشر: حلقات جديدة، مسلسلات جديدة، أخبار، وإشعارات الأدمن.
+  // (سابقاً كانت الحلقات فقط وللمسلسلات المتابَعة فقط، فلا يظهر خبر ولا مسلسل جديد.)
   let ids = csv(q.series_ids);
   if (!ids.length && user) ids = getLibrary(user.id).followed;
+  const followed = new Set(ids);
   const out = [];
   const since = now() - NEW_EPISODE_DAYS * 86400000;
-  for (const sid of uniq(ids).slice(0, 300)) {
-    const s = seriesById(sid);
-    if (!s || isHidden(sid)) continue;
-    for (const e of db.episodes[sid] || []) {
-      if (!e.added_at || e.added_at < since) continue;
+
+  // 1) حلقات جديدة: لكل المسلسلات الظاهرة (آخر 3 حلقات لكل مسلسل حتى لا تغرق القائمة عند الإضافة الجماعية)
+  for (const s of db.series) {
+    if (isHidden(s.id)) continue;
+    const fresh = (db.episodes[s.id] || []).filter((e) => e.added_at && e.added_at >= since)
+      .sort((a, b) => b.added_at - a.added_at).slice(0, 3);
+    for (const e of fresh) {
       out.push({
-        id: 'ep_' + sid + '_' + (e.season * 10000 + e.number), title: 'حلقة جديدة · ' + s.title,
+        id: 'ep_' + s.id + '_' + (e.season * 10000 + e.number), kind: 'episode',
+        title: 'حلقة جديدة · ' + s.title,
         body: 'صدرت الحلقة ' + e.number + (s.seasons > 1 ? ' من الموسم ' + e.season : '') + ' وهي متاحة الآن للمشاهدة والتحميل',
-        created_at: rel(e.added_at), series_id: sid, chapter: e.number, read: false, _at: e.added_at,
+        created_at: rel(e.added_at), created_ts: e.added_at, series_id: s.id, chapter: e.number,
+        followed: followed.has(s.id), read: false, _at: e.added_at,
       });
     }
   }
-  for (const b of db.broadcasts) out.push({ id: 'bc_' + b.id, title: b.title, body: b.body, image: b.image ? absUrl(b.image) : null, created_at: rel(b.at), series_id: b.series_id || null, chapter: null, read: false, _at: b.at });
+
+  // 2) مسلسلات/أعمال جديدة نُشرت حديثاً
+  for (const s of db.series.slice().sort((a, b) => (b.created_at || 0) - (a.created_at || 0)).slice(0, 10)) {
+    if (isHidden(s.id) || !s.created_at || s.created_at < since) continue;
+    out.push({
+      id: 'sr_' + s.id, kind: 'series', title: 'عمل جديد · ' + s.title,
+      body: s.synopsis ? String(s.synopsis).slice(0, 140) : 'أُضيف عمل جديد إلى الموقع، تفضّل بمشاهدته الآن',
+      image: s.cover ? absUrl(s.cover) : null,
+      created_at: rel(s.created_at), created_ts: s.created_at, series_id: s.id, chapter: null,
+      followed: followed.has(s.id), read: false, _at: s.created_at,
+    });
+  }
+
+  // 3) الأخبار
+  for (const n of db.news) {
+    if (!n.at || n.at < since) continue;
+    out.push({
+      id: 'nw_' + n.id, kind: 'news', title: 'خبر · ' + n.title,
+      body: String(n.body || '').replace(/\s+/g, ' ').slice(0, 140),
+      image: n.image ? absUrl(n.image) : null,
+      created_at: rel(n.at), created_ts: n.at, series_id: null, news_id: n.id, chapter: null, read: false, _at: n.at,
+    });
+  }
+
+  // 4) إشعارات الأدمن العامة
+  for (const b of db.broadcasts) out.push({ id: 'bc_' + b.id, kind: 'broadcast', title: b.title, body: b.body, image: b.image ? absUrl(b.image) : null, created_at: rel(b.at), created_ts: b.at, series_id: b.series_id || null, chapter: null, read: false, _at: b.at });
+
   return out.sort((a, b) => b._at - a._at).slice(0, 60).map(({ _at, ...r }) => r);
 });
 
@@ -1807,7 +1840,7 @@ function otherUser(id, me) {
   return u;
 }
 function listTarget(id, viewer) {
-  const t = userById(id);
+  const t = id === 'me' && viewer ? userById(viewer.id) : userById(id);
   if (!t || t.deleted) throw notFound('المستخدم غير موجود');
   if (!audienceAllows(privacyOf(t).friends_list, relationOf(viewer ? viewer.id : '', t.id))) throw forbidden('هذه القائمة خاصة');
   return t;
