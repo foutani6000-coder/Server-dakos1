@@ -137,6 +137,20 @@ function strList(v) {
   return [];
 }
 
+/** قائمة سيرفرات التطبيق الاحتياطية (railway / vercel ...): https فقط، بلا تكرار، حتى 10 */
+function cleanServers(v) {
+  if (!Array.isArray(v)) return null;
+  const seen = new Set(); const out = [];
+  for (const s of v) {
+    if (!isObj(s)) continue;
+    const url = str(s.url, 300).replace(/\/+$/, '');
+    if (!/^https:\/\/[^\s\/]+(\/[^\s]*)?$/i.test(url) || seen.has(url)) continue;
+    seen.add(url);
+    out.push({ url, label: str(s.label, 40), on: s.on !== false });
+  }
+  return out.slice(0, 10);
+}
+
 /** وقت نسبي بالعربية كما يعرضه التطبيق (النص يُعرض كما هو) */
 function rel(ts) {
   if (!ts) return '';
@@ -223,7 +237,7 @@ function emptyDb() {
     admin: { user: ENV.ADMIN_USER || 'admin', pass: hashPassword(ENV.ADMIN_PASS || 'admin123'), default_pass: !ENV.ADMIN_PASS },
     settings: {
       types: DEFAULT_TYPES.slice(), genres: DEFAULT_GENRES.slice(), countries: DEFAULT_COUNTRIES.slice(),
-      adblock: true, announcement: { on: false, text: '' }, sections: {}, featured: [], hidden: [],
+      adblock: true, announcement: { on: false, text: '' }, sections: {}, featured: [], hidden: [], servers: [],
     },
     series: [], episodes: {}, news: [], posts: [], comments: [], users: [], ratings: {}, libraries: {},
     broadcasts: [], chats: [], groups: [], resets: {},
@@ -877,6 +891,7 @@ GET('/config', 'none', () => ({
   types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, qualities: QUALITY_OPTIONS,
   statuses: STATUS_OPTIONS, adblock: db.settings.adblock !== false, announcement: db.settings.announcement,
   sections: Object.fromEntries(Object.keys(HOME_SECTIONS).map((k) => [k, db.settings.sections[k] !== false])),
+  servers: (db.settings.servers || []).filter((x) => x.on !== false), // سيرفرات التطبيق الاحتياطية المفعّلة
 }));
 
 // ════════════════════════════════════════════════════════════════════════
@@ -2572,12 +2587,14 @@ POST('/admin/groups/:id/settings', 'admin', ({ params, body }) => {
 });
 
 // ───────── الإعدادات ─────────
-GET('/admin/settings', 'admin', () => ({ types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock !== false, qualities: QUALITY_OPTIONS, statuses: STATUS_OPTIONS, username: db.admin.user }));
+GET('/admin/settings', 'admin', () => ({ types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock !== false, servers: db.settings.servers || [], qualities: QUALITY_OPTIONS, statuses: STATUS_OPTIONS, username: db.admin.user }));
 PUT('/admin/settings', 'admin', ({ body }) => {
   for (const k of ['types', 'genres', 'countries']) if (body[k] !== undefined) db.settings[k] = strList(body[k]).slice(0, 500);
   if (body.adblock !== undefined) db.settings.adblock = bool(body.adblock);
+  const sv = cleanServers(body.servers);
+  if (sv) db.settings.servers = sv;
   save();
-  return { types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock };
+  return { types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock, servers: db.settings.servers || [] };
 });
 /** تغيير اسم المستخدم وكلمة مرور الأدمن */
 POST('/admin/account', 'admin', ({ body }) => {
@@ -2989,6 +3006,13 @@ VIEWS.settings=function(m){
   var st=S.settings;
   m.appendChild(h('div',{cls:'card'},h('h2',{},'القوائم'),form([{k:'types',label:'الأنواع (سطر لكل عنصر)',type:'textarea'},{k:'genres',label:'التصنيفات',type:'textarea'},{k:'countries',label:'البلدان',type:'textarea'},{k:'adblock',label:'تفعيل مانع الإعلانات',type:'check'}],st,'حفظ',function(v){
     return guard(api('PUT','/admin/settings',{types:lines(v.types),genres:lines(v.genres),countries:lines(v.countries),adblock:v.adblock}),'تم الحفظ');
+  })));
+  m.appendChild(h('div',{cls:'card'},h('h2',{},'سيرفرات التطبيق (railway / vercel ...)'),form([{k:'servers',label:'سطر لكل سيرفر بالشكل: الاسم | الرابط  — ضع # في أول السطر لإيقافه. الأول في القائمة أولاً بعد السيرفر الأساسي.',type:'textarea',dir:'ltr'}],{servers:(st.servers||[]).map(function(x){return (x.on===false?'# ':'')+(x.label?x.label+' | ':'')+x.url}).join('\n')},'حفظ',function(v){
+    var list=String(v.servers||'').split('\n').map(function(x){return x.trim()}).filter(Boolean).map(function(x){
+      var on=x.charAt(0)!=='#';if(!on)x=x.replace(/^#+\s*/,'');
+      var i=x.lastIndexOf('|');return i<0?{url:x.trim(),label:'',on:on}:{label:x.slice(0,i).trim(),url:x.slice(i+1).trim(),on:on};
+    });
+    return guard(api('PUT','/admin/settings',{servers:list}),'تم حفظ السيرفرات').then(function(r){st.servers=r.servers});
   })));
   m.appendChild(h('div',{cls:'card'},h('h2',{},'حساب الأدمن'),form([{k:'username',label:'اسم المستخدم',dir:'ltr'},{k:'password',label:'كلمة المرور الجديدة (6+)',type:'password',dir:'ltr'},{k:'confirm',label:'تأكيد كلمة المرور',type:'password',dir:'ltr'}],{username:st.username},'حفظ',function(v){
     return guard(api('POST','/admin/account',v),'تم تحديث حساب الأدمن').then(function(r){TOKEN=r.token;try{localStorage.setItem('sedhok_admin',TOKEN)}catch(e){}});
