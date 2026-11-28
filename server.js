@@ -535,6 +535,7 @@ function episodePublic(e) {
     sources: (e.sources || []).map((x) => ({ quality: x.quality, url: x.url, size_mb: x.size_mb || 0 })),
     subtitles: (e.subtitles || []).map((x) => ({ lang: x.lang, url: x.url, label: x.label || '' })),
     player_url: e.player_url || '',
+    doodstream_url: e.doodstream_url || '',
   };
 }
 
@@ -580,6 +581,8 @@ function normEpisode(b, prev) {
   if (number < 1) throw bad('رقم الحلقة يجب أن يكون 1 فأكثر');
   const player = b.player_url !== undefined || b.player !== undefined || b.embed !== undefined ? str(b.player_url || b.player || b.embed, 2048) : (prev ? prev.player_url : '');
   if (player && !safeUrl(player) && !/^<iframe/i.test(player)) throw bad('رابط المشغّل يجب أن يبدأ بـ http:// أو https://');
+  const dood = b.doodstream_url !== undefined ? str(b.doodstream_url, 2048) : (prev && prev.doodstream_url) || '';
+  if (dood && !/^https?:\/\/[^\s]+$/i.test(dood)) throw bad('رابط DoodStream يجب أن يبدأ بـ http:// أو https://');
   const hasSources = b.sources !== undefined || b.qualities !== undefined || b.url !== undefined || b.video_url !== undefined || b.video !== undefined || b.link !== undefined;
   const sources = hasSources
     ? normSources(b.sources ?? b.qualities, b.url || b.video_url || b.video || b.link)
@@ -598,7 +601,7 @@ function normEpisode(b, prev) {
     thumb: th || '',
     date: str(b.date ?? (prev ? prev.date : ''), 40) || dateLabel(now()),
     is_new: b.is_new !== undefined || b.new !== undefined ? bool(b.is_new ?? b.new) : (prev ? !!prev.is_new : true),
-    sources, subtitles, player_url: player,
+    sources, subtitles, player_url: player, doodstream_url: dood,
     added_at: prev && prev.added_at ? prev.added_at : now(),
   };
 }
@@ -2209,7 +2212,7 @@ POST('/admin/series/:id/episodes/bulk', 'admin', ({ params, body }) => {
       sources: Object.fromEntries(Object.entries(dl).filter(([, p]) => str(p)).map(([q, p]) => [q, fill(p)])),
     }, null);
     const i = list.findIndex((x) => x.season === season && x.number === n);
-    if (i >= 0) list.splice(i, 1);
+    if (i >= 0) { e.doodstream_url = list[i].doodstream_url || ''; list.splice(i, 1); }
     list.push(e); added++;
   }
   sortEpisodes(list); syncSeriesFromEpisodes(params.id); save();
