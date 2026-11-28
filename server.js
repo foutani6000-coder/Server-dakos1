@@ -13,7 +13,7 @@
    PORT=3000  HOST=0.0.0.0  DATA_DIR=./data  PUBLIC_URL=https://example.com
    ADMIN_USER=admin  ADMIN_PASS=admin123      (تُستعمل أول تشغيل فقط، ثم تُحفظ مُشفّرة)
    API_KEY=            (إن وُضع: كل طلب يجب أن يحمل توكن مستخدم أو Bearer API_KEY)
-   GOOGLE_CLIENT_ID=   (للتحقق من id_token في /auth/google؛ بدونه يُرفض الدخول بـ Google)
+   GOOGLE_CLIENT_ID=   (اختياري: معرّفات إضافية مفصولة بفواصل؛ معرّف Sedhook Web مقبول دائماً في /auth/google)
    FACEBOOK_APP_ID=  FACEBOOK_APP_SECRET=   (اختياريان: يتحقق /auth/facebook أن الرمز صادر لتطبيقك ويسمح بربط الحساب بالبريد)
    SEED_DEMO=1         (يملأ قاعدة البيانات الفارغة بـ 10 مسلسلات تجريبية)
    COUNT_VIEWS=1       (زيادة مشاهدات المسلسل عند فتح حلقاته؛ 0 لإيقافه)
@@ -87,7 +87,10 @@ const PUBLIC_URL = (ENV.PUBLIC_URL
   || (ENV.RAILWAY_PUBLIC_DOMAIN ? 'https://' + ENV.RAILWAY_PUBLIC_DOMAIN : '')
   || (ENV.VERCEL_PROJECT_PRODUCTION_URL ? 'https://' + ENV.VERCEL_PROJECT_PRODUCTION_URL : '')).replace(/\/+$/, '');
 const API_KEY = ENV.API_KEY || '';
-const GOOGLE_CLIENT_ID = ENV.GOOGLE_CLIENT_ID || '';
+// معرّف Web الذي يضعه التطبيق في serverClientId (Sedhook Web). يُقبل دائماً كجمهور (aud) لرمز Google،
+// ويمكن إضافة معرّفات أخرى في GOOGLE_CLIENT_ID مفصولة بفواصل.
+const GOOGLE_WEB_CLIENT_ID = '609379171015-8sp6opumbff39mbhkn18qv0905a5l4ss.apps.googleusercontent.com';
+const GOOGLE_CLIENT_IDS = [...new Set([...(ENV.GOOGLE_CLIENT_ID || '').split(',').map((x) => x.trim()).filter(Boolean), GOOGLE_WEB_CLIENT_ID])];
 const FB_APP_ID = ENV.FACEBOOK_APP_ID || '';
 const FB_APP_SECRET = ENV.FACEBOOK_APP_SECRET || '';
 const COUNT_VIEWS = ENV.COUNT_VIEWS !== '0';
@@ -237,7 +240,7 @@ function emptyDb() {
     admin: { user: ENV.ADMIN_USER || 'admin', pass: hashPassword(ENV.ADMIN_PASS || 'admin123'), default_pass: !ENV.ADMIN_PASS },
     settings: {
       types: DEFAULT_TYPES.slice(), genres: DEFAULT_GENRES.slice(), countries: DEFAULT_COUNTRIES.slice(),
-      adblock: true, announcement: { on: false, text: '' }, sections: {}, featured: [], hidden: [], servers: [],
+      adblock: true, announcement: { on: false, text: '' }, sections: {}, featured: [], hidden: [], servers: [], social: { facebook: '', telegram: '' },
     },
     series: [], episodes: {}, news: [], posts: [], comments: [], users: [], ratings: {}, libraries: {},
     broadcasts: [], chats: [], groups: [], resets: {},
@@ -887,11 +890,13 @@ function needActive(ctx) {
 GET('/', 'none', () => ({ name: 'Sedhok API', status: 'ok', admin: '/admin', health: '/health' }));
 GET('/health', 'none', () => ({ ok: true, role: SERVER_ROLE, peer: PEER_URL ? (peerDownUntil > now() ? 'down' : 'up') : 'none', storage: PG ? 'neon' : 'file', runtime: SERVERLESS ? 'serverless' : 'server', time: new Date().toISOString(), series: db.series.length, users: db.users.length }));
 /** إعدادات عامة (التطبيق الحالي يضبطها محلياً؛ متاحة لأي نسخة تريد قراءتها من السيرفر) */
+const socialLinks = () => ({ facebook: str((db.settings.social || {}).facebook, 2048), telegram: str((db.settings.social || {}).telegram, 2048) });
 GET('/config', 'none', () => ({
   types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, qualities: QUALITY_OPTIONS,
   statuses: STATUS_OPTIONS, adblock: db.settings.adblock !== false, announcement: db.settings.announcement,
   sections: Object.fromEntries(Object.keys(HOME_SECTIONS).map((k) => [k, db.settings.sections[k] !== false])),
   servers: (db.settings.servers || []).filter((x) => x.on !== false), // سيرفرات التطبيق الاحتياطية المفعّلة
+  social: socialLinks(), // روابط «تواصل معنا» (فيسبوك/تليجرام)
 }));
 
 // ════════════════════════════════════════════════════════════════════════
@@ -938,7 +943,6 @@ function httpsGetJson(u) {
 }
 POST('/auth/google', 'none', async ({ body, ip }) => {
   rateLimit(ip, 'google', 20, 15 * 60000);
-  if (!GOOGLE_CLIENT_ID) throw new HttpError(501, 'تسجيل Google غير مفعّل (اضبط GOOGLE_CLIENT_ID)');
   const idToken = str(body.id_token, 4096);
   if (!idToken) throw bad('id_token مطلوب');
   let info;
@@ -947,7 +951,7 @@ POST('/auth/google', 'none', async ({ body, ip }) => {
     if (r.status !== 200) throw new Error('invalid');
     info = r.json;
   } catch { throw unauthorized('رمز Google غير صالح'); }
-  if (info.aud !== GOOGLE_CLIENT_ID || !['accounts.google.com', 'https://accounts.google.com'].includes(info.iss)) throw unauthorized('رمز Google غير موجّه لهذا التطبيق');
+  if (!GOOGLE_CLIENT_IDS.includes(info.aud) || !['accounts.google.com', 'https://accounts.google.com'].includes(info.iss)) throw unauthorized('رمز Google غير موجّه لهذا التطبيق');
   if (info.email_verified !== 'true' && info.email_verified !== true) throw unauthorized('بريد Google غير موثّق');
   const email = str(info.email, 200).toLowerCase();
   let u = db.users.find((x) => x.google_sub === info.sub) || db.users.find((x) => x.email === email);
@@ -1343,7 +1347,7 @@ GET('/notifications', 'optional', ({ q, user }) => {
   }
 
   // 4) إشعارات الأدمن العامة
-  for (const b of db.broadcasts) out.push({ id: 'bc_' + b.id, kind: 'broadcast', title: b.title, body: b.body, image: b.image ? absUrl(b.image) : null, created_at: rel(b.at), created_ts: b.at, series_id: b.series_id || null, chapter: null, read: false, _at: b.at });
+  for (const b of db.broadcasts) out.push({ id: 'bc_' + b.id, kind: 'broadcast', title: b.title, body: b.body, image: b.image ? absUrl(b.image) : null, created_at: rel(b.at), created_ts: b.at, series_id: b.series_id || null, chapter: null, heads_up: !!b.heads_up, read: false, _at: b.at });
 
   return out.sort((a, b) => b._at - a._at).slice(0, 60).map(({ _at, ...r }) => r);
 });
@@ -1356,7 +1360,7 @@ GET('/broadcasts', 'none', ({ q }) => {
   const since = parseInt(q.since, 10) || 0;
   if (!since) return { now: t, broadcasts: [] };
   const list = db.broadcasts.filter((b) => b.at > since).sort((a, b) => a.at - b.at).slice(0, 5)
-    .map((b) => ({ id: String(b.id), title: b.title, body: b.body, image: b.image ? absUrl(b.image) : '', series_id: b.series_id || '', created_at_ms: b.at }));
+    .map((b) => ({ id: String(b.id), title: b.title, body: b.body, image: b.image ? absUrl(b.image) : '', series_id: b.series_id || '', heads_up: !!b.heads_up, created_at_ms: b.at }));
   return { now: t, broadcasts: list };
 });
 
@@ -2435,7 +2439,7 @@ POST('/admin/users/:id/reset-token', 'admin', ({ params }) => {
 });
 
 // ───────── الإشعارات العامة ─────────
-const broadcastAdmin = (b) => ({ id: b.id, title: b.title, body: b.body, image: b.image ? absUrl(b.image) : '', series_id: b.series_id || '', created_at: rel(b.at), created_ts: b.at });
+const broadcastAdmin = (b) => ({ id: b.id, title: b.title, body: b.body, image: b.image ? absUrl(b.image) : '', series_id: b.series_id || '', heads_up: !!b.heads_up, created_at: rel(b.at), created_ts: b.at });
 GET('/admin/notifications', 'admin', () => db.broadcasts.slice().reverse().map(broadcastAdmin));
 GET('/admin/broadcasts', 'admin', () => db.broadcasts.slice().reverse().map(broadcastAdmin));
 /** ينشر إشعاراً لكل المستخدمين (JSON أو multipart). الصورة اختيارية: ملف image/file أو رابط image. النص اختياري إن وُجد عنوان. */
@@ -2446,9 +2450,10 @@ function createBroadcast({ body, files }) {
   if (sid && !seriesById(sid)) throw bad('العمل المرتبط غير موجود');
   const f = ((files && (files.image || files.file || files.images)) || [])[0];
   const image = f ? saveImage(f) : safeUrl(body.image);
-  const b = { id: uid('b'), title, body: text, image, series_id: sid, at: now() };
+  const headsUp = bool(body.heads_up !== undefined ? body.heads_up : body.headsUp); // إظهاره كإشعار منبثق فوق الهاتف
+  const b = { id: uid('b'), title, body: text, image, series_id: sid, heads_up: headsUp, at: now() };
   db.broadcasts.push(b); save();
-  return { id: b.id, title, body: text, image: image ? absUrl(image) : '', series_id: sid, created_at: rel(b.at) };
+  return { id: b.id, title, body: text, image: image ? absUrl(image) : '', series_id: sid, heads_up: headsUp, created_at: rel(b.at) };
 }
 function deleteBroadcast({ params }) {
   const b = db.broadcasts.find((x) => x.id === params.id);
@@ -2587,14 +2592,17 @@ POST('/admin/groups/:id/settings', 'admin', ({ params, body }) => {
 });
 
 // ───────── الإعدادات ─────────
-GET('/admin/settings', 'admin', () => ({ types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock !== false, servers: db.settings.servers || [], qualities: QUALITY_OPTIONS, statuses: STATUS_OPTIONS, username: db.admin.user }));
+GET('/admin/settings', 'admin', () => ({ types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock !== false, servers: db.settings.servers || [], social: socialLinks(), qualities: QUALITY_OPTIONS, statuses: STATUS_OPTIONS, username: db.admin.user }));
 PUT('/admin/settings', 'admin', ({ body }) => {
   for (const k of ['types', 'genres', 'countries']) if (body[k] !== undefined) db.settings[k] = strList(body[k]).slice(0, 500);
   if (body.adblock !== undefined) db.settings.adblock = bool(body.adblock);
   const sv = cleanServers(body.servers);
   if (sv) db.settings.servers = sv;
+  if (isObj(body.social)) {
+    db.settings.social = { facebook: safeUrl(body.social.facebook), telegram: safeUrl(body.social.telegram) };
+  }
   save();
-  return { types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock, servers: db.settings.servers || [] };
+  return { types: db.settings.types, genres: db.settings.genres, countries: db.settings.countries, adblock: db.settings.adblock, servers: db.settings.servers || [], social: socialLinks() };
 });
 /** تغيير اسم المستخدم وكلمة مرور الأدمن */
 POST('/admin/account', 'admin', ({ body }) => {
@@ -2991,10 +2999,10 @@ function userForm(u,done){
 VIEWS.notif=function(m){
   var list=h('div');
   var sel=h('select',{});sel.appendChild(h('option',{value:''},'بدون ربط'));api('GET','/admin/series').then(function(all){all.forEach(function(s){sel.appendChild(h('option',{value:s.id},s.title))})});
-  var t=h('input',{type:'text',placeholder:'عنوان الإشعار'}),b=h('textarea',{placeholder:'نص الإشعار'});
-  m.appendChild(h('div',{cls:'card'},h('h2',{},'إرسال إشعار لكل المستخدمين'),h('label',{},'العنوان'),t,h('label',{},'النص'),b,h('label',{},'يفتح عملاً عند الضغط (اختياري)'),sel,h('div',{style:'margin-top:12px'},h('button',{cls:'btn pri',on:{click:function(){guard(api('POST','/admin/notifications',{title:t.value,body:b.value,series_id:sel.value}),'تم الإرسال').then(function(){t.value='';b.value='';load()})}}},'إرسال'))));
+  var t=h('input',{type:'text',placeholder:'عنوان الإشعار'}),b=h('textarea',{placeholder:'نص الإشعار'}),hu=h('input',{type:'checkbox'});
+  m.appendChild(h('div',{cls:'card'},h('h2',{},'إرسال إشعار لكل المستخدمين'),h('label',{},'العنوان'),t,h('label',{},'النص'),b,h('label',{},'يفتح عملاً عند الضغط (اختياري)'),sel,h('div',{cls:'chk',style:'margin-top:12px'},hu,h('span',{},'إظهاره فوق الهاتف (إشعار منبثق)')),h('div',{style:'margin-top:12px'},h('button',{cls:'btn pri',on:{click:function(){guard(api('POST','/admin/notifications',{title:t.value,body:b.value,series_id:sel.value,heads_up:hu.checked}),'تم الإرسال').then(function(){t.value='';b.value='';hu.checked=false;load()})}}},'إرسال'))));
   m.appendChild(list);
-  function load(){api('GET','/admin/notifications').then(function(rows){list.textContent='';list.appendChild(h('div',{cls:'card'},h('h3',{},'المُرسَلة ('+rows.length+')'),table(['العنوان','النص','',''],rows.map(function(n){return [n.title,n.body,n.created_at,act('حذف',function(){guard(api('DELETE','/admin/notifications/'+n.id)).then(load)},'danger')]}))))})}
+  function load(){api('GET','/admin/notifications').then(function(rows){list.textContent='';list.appendChild(h('div',{cls:'card'},h('h3',{},'المُرسَلة ('+rows.length+')'),table(['العنوان','النص','',''],rows.map(function(n){return [n.title,n.body,[n.heads_up?h('span',{cls:'tag ok'},'منبثق'):null,h('span',{},' '+n.created_at)],act('حذف',function(){guard(api('DELETE','/admin/notifications/'+n.id)).then(load)},'danger')]}))))})}
   load();
 };
 VIEWS.groups=function(m){
@@ -3013,6 +3021,9 @@ VIEWS.settings=function(m){
       var i=x.lastIndexOf('|');return i<0?{url:x.trim(),label:'',on:on}:{label:x.slice(0,i).trim(),url:x.slice(i+1).trim(),on:on};
     });
     return guard(api('PUT','/admin/settings',{servers:list}),'تم حفظ السيرفرات').then(function(r){st.servers=r.servers});
+  })));
+  m.appendChild(h('div',{cls:'card'},h('h2',{},'روابط التواصل (تواصل معنا)'),form([{k:'facebook',label:'رابط فيسبوك (اتركه فارغاً لإخفائه)',dir:'ltr'},{k:'telegram',label:'رابط تليجرام',dir:'ltr'}],st.social||{},'حفظ',function(v){
+    return guard(api('PUT','/admin/settings',{social:{facebook:String(v.facebook||'').trim(),telegram:String(v.telegram||'').trim()}}),'تم حفظ روابط التواصل').then(function(r){st.social=r.social});
   })));
   m.appendChild(h('div',{cls:'card'},h('h2',{},'حساب الأدمن'),form([{k:'username',label:'اسم المستخدم',dir:'ltr'},{k:'password',label:'كلمة المرور الجديدة (6+)',type:'password',dir:'ltr'},{k:'confirm',label:'تأكيد كلمة المرور',type:'password',dir:'ltr'}],{username:st.username},'حفظ',function(v){
     return guard(api('POST','/admin/account',v),'تم تحديث حساب الأدمن').then(function(r){TOKEN=r.token;try{localStorage.setItem('sedhok_admin',TOKEN)}catch(e){}});
@@ -3162,7 +3173,7 @@ function banner() {
   console.log('  المسارات:       ' + routes.length + ' مساراً');
   console.log('  الدور:          ' + SERVER_ROLE + (PEER_URL ? '   (السيرفر الآخر: ' + PEER_URL + ')' : '   (بدون PEER_URL: لا توزيع)'));
   if (!API_KEY) console.log('  API_KEY:        غير مضبوط (المسارات العامة مفتوحة للقراءة)');
-  if (!GOOGLE_CLIENT_ID) console.log('  Google:         غير مفعّل (اضبط GOOGLE_CLIENT_ID لتفعيل /auth/google)');
+  console.log('  Google:         يقبل ' + GOOGLE_CLIENT_IDS.length + ' معرّف(ات) عميل للتحقق من id_token');
   console.log('');
 }
 
